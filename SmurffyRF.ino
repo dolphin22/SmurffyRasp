@@ -1,29 +1,3 @@
-/*
- Copyright (C) 2011 J. Coliz <maniacbug@ymail.com>
-
- This program is free software; you can redistribute it and/or
- modify it under the terms of the GNU General Public License
- version 2 as published by the Free Software Foundation.
- 
- TMRh20 2014 - Updates to the library allow sleeping both in TX and RX modes:
-      TX Mode: The radio can be powered down (.9uA current) and the Arduino slept using the watchdog timer
-      RX Mode: The radio can be left in standby mode (22uA current) and the Arduino slept using an interrupt pin
- */
-
-/**
- * Example RF Radio Ping Pair which Sleeps between Sends
- *
- * This is an example of how to use the RF24 class to create a battery-
- * efficient system.  It is just like the GettingStarted_CallResponse example, but the
- * ping node powers down the radio and sleeps the MCU after every
- * ping/pong cycle, and the receiver sleeps between payloads.
- *
- * Write this sketch to two different nodes,
- * connect the role_pin to ground on one.  The ping node sends the current
- * time to the pong node, which responds by sending the value back.  The ping
- * node can then see how long the whole cycle took.
- */
-
 #include <SPI.h>
 #include <avr/sleep.h>
 #include <avr/power.h>
@@ -34,33 +8,18 @@
 #include <Wire.h>
 #include <LibHumidity.h>
 
+#define MAX_SIZE 19
 
-// Set up nRF24L01 radio on SPI bus plus pins 7 & 8
+// Hardware configuration: Set up nRF24L01 radio on SPI bus plus pins 7 & 8 
 RF24 radio(7,8);
 
-// SHT2x
+// SHT25
 LibHumidity sht25 = LibHumidity(0);
 
-// sets the role of this unit in hardware.  Connect to GND to be the 'pong' receiver
-// Leave open to be the 'ping' transmitter
-const int role_pin = 5;
+// Airspeed
+int airspeedPin = 3;
 
-byte pipes[][6] = {"1Node", "2Node"};
-//const uint64_t pipes[2] = { 0xF0F0F0F0E1LL, 0xF0F0F0F0D2LL };   // Radio pipe addresses for the 2 nodes to communicate.
-
-// Role management
-// Set up role.  This sketch uses the same software for all the nodes
-// in this system.  Doing so greatly simplifies testing.  The hardware itself specifies
-// which node it is.
-
-// The various roles supported by this sketch
-typedef enum { role_ping_out = 1, role_pong_back } role_e;
-
-// The debug-friendly names of those roles
-const char* role_friendly_name[] = { "invalid", "Ping out", "Pong back"};
-
-// The role of the current running sketch
-role_e role;
+byte pipes[][6] = {"1Node","2Node"};
 
 // Sleep declarations
 typedef enum { wdt_16ms = 0, wdt_32ms, wdt_64ms, wdt_128ms, wdt_250ms, wdt_500ms, wdt_1s, wdt_2s, wdt_4s, wdt_8s } wdt_prescalar_e;
@@ -71,79 +30,62 @@ void do_sleep(void);
 const short sleep_cycles_per_transmission = 4;
 volatile short sleep_cycles_remaining = sleep_cycles_per_transmission;
 
-void setup(){
+void setup() {
 
-  // set up the role pin
-  pinMode(role_pin, INPUT);
-  digitalWrite(role_pin,HIGH);
-  delay(20); // Just to get a solid reading on the role pin
-
-  // read the address pin, establish our role
-  if ( digitalRead(role_pin) )
-    role = role_ping_out;
-  else
-    role = role_pong_back;
 
   Serial.begin(57600);
   printf_begin();
-  printf("\n\rRF24/examples/pingpair_sleepy/\n\r");
-  printf("ROLE: %s\n\r",role_friendly_name[role]);
-
+  printf("\n\rSmurrfy Sensor\n\r");
+  
   // Prepare sleep parameters
   // Only the ping out role uses WDT.  Wake up every 4s to send a ping
-  // if ( role == role_ping_out )
-    setup_watchdog(wdt_4s);
+  setup_watchdog(wdt_4s);
 
   // Setup and configure rf radio
-  radio.begin();
-  //radio.setDataRate(RF24_250KBPS);
+  radio.begin();                          // Start up the radio
+  radio.setAutoAck(1);                    // Ensure autoACK is enabled
+  radio.enableAckPayload();
+  radio.setRetries(4,2);                // Max delay between retries & number of retries
+  radio.setPayloadSize(MAX_SIZE+1);
+  radio.openWritingPipe(pipes[0]);
+  radio.openReadingPipe(1,pipes[1]);
   
-  // Open pipes to other nodes for communication
-
-  // This simple sketch opens two pipes for these two nodes to communicate
-  // back and forth.
-  // Open 'our' pipe for writing
-  // Open the 'other' pipe for reading, in position #1 (we can have up to 5 pipes open for reading)
-
-  if ( role == role_ping_out ) {
-    radio.openWritingPipe(pipes[0]);
-    radio.openReadingPipe(1,pipes[1]);
-  } else {
-    radio.openWritingPipe(pipes[1]);
-    radio.openReadingPipe(1,pipes[0]);
-  }
-
-  // Start listening
-  radio.startListening();
-
-  // Dump the configuration of the rf unit for debugging
-  radio.printDetails();
+  radio.startListening();                 // Start listening
+  radio.printDetails();                   // Dump the configuration of the rf unit for debugging
 }
 
-void loop(){
-
-  
-  if (role == role_ping_out)  {                     // Ping out role.  Repeatedly send the current time
+void loop(void){
+    
     radio.powerUp();                                // Power up the radio after sleeping
     radio.stopListening();                          // First, stop listening so we can talk.
-                         
-    unsigned long time = millis();                  // Take the time, and send it.
+    
+    char data[MAX_SIZE+1];
+                   
     char deviceID[3] = "01";
-    char tempF[5], humiF[5];
+    char tempF[5], humiF[5], airspeed[5];
+    
     dtostrf(sht25.GetTemperatureC(),5,2,tempF);
     wdt_reset();
     dtostrf(sht25.GetHumidity(),5,2,humiF); 
     wdt_reset(); 
     
-    char data[16];
-    sprintf(data, "S%sT%.5sH%.5s", deviceID, tempF, humiF);
-    wdt_reset();
-    printf("Now sending... %s \n\r",data);
-    wdt_reset();
+    sprintf(data, "S%sT%.5sH%.5sA%d", deviceID, tempF, humiF, analogRead(airspeedPin));
+    data[MAX_SIZE+1] = 0;
     
-    radio.write( &data, 16 );
+    printf("Now sending %s.\n\r", data);
 
-    radio.startListening();                         // Now, continue listening
+    radio.write(data, MAX_SIZE+1);
+    
+    /*
+    if(!radio.available()){                             // If nothing in the buffer, we got an ack but it is blank
+        printf("Got blank response.\n\r");     
+    }else{      
+        while(radio.available() ){                      // If an ack with payload was received
+            radio.read( data, 16 );                  // Read it, and display the data
+        }
+        printf("Got response %s.\n\r",data);
+    }
+    */
     
     unsigned long started_waiting_at = millis();    // Wait here until we get a response, or timeout (250ms)
     bool timeout = false;
@@ -156,45 +98,21 @@ void loop(){
     
     if ( timeout ) {                                // Describe the results
         printf("Failed, response timed out.\n\r");
-    }else{        
-        unsigned long got_time;                     // Grab the response, compare, and send to debugging spew
-        radio.read( &got_time, sizeof(unsigned long) );
-    
-        printf("Got response %lu, round-trip delay: %lu\n\r",got_time,millis()-got_time);
+    }else{
+        while(radio.available()) {      
+          radio.read( data, MAX_SIZE+1 );
+        }
+        
+        printf("Got response %s.\n\r",data);
     }
 
     // Shut down the system
-    delay(500);                     // Experiment with some delay here to see if it has an effect
+    delay(500);
+    
                                     // Power down the radio.  
     radio.powerDown();              // NOTE: The radio MUST be powered back up again manually
-
                                     // Sleep the MCU.
-      do_sleep();
-  }
-
-
-  // Pong back role.  Receive each packet, dump it out, and send it back
-  if ( role == role_pong_back ) {
-    
-    if ( radio.available() ) {                                  // if there is data ready
-      
-        unsigned long got_time;
-        while (radio.available()) {                             // Dump the payloads until we've gotten everything
-          radio.read( &got_time, sizeof(unsigned long) );       // Get the payload, and see if this was the last one.
-                                                                // Spew it.  Include our time, because the ping_out millis counter is unreliable
-          printf("Got payload %lu @ %lu...",got_time,millis()); // due to it sleeping
-        }
-     
-        radio.stopListening();                                  // First, stop listening so we can talk
-        radio.write( &got_time, sizeof(unsigned long) );        // Send the final one back.
-        printf("Sent response.\n\r");
-        radio.startListening();                                 // Now, resume listening so we catch the next packets.
-    }else{
-        Serial.println("Sleeping");
-        delay(50);                                             // Delay so the serial data can print out
-        do_sleep();
-    }
-  }
+    do_sleep();
 }
 
 void wakeUp(){
